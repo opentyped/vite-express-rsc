@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.playwright/
+test-results/
+.release/
+coverage/
+*.tsbuildinfo
+*.tgz
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store

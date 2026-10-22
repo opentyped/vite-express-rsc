@@ -1,0 +1,37 @@
+# Based on the bundled default preset; package and example ownership is explicit.
+[files]
+exclude = ["**/.git", "**/node_modules", "**/dist", "**/test-results"]
+
+[[rules.layout]]
+target = "."
+mode = "permissive"
+files.required = ["package.json", "tsconfig.json"]
+
+[[rules.layout]]
+target = "packages/*"
+mode = "permissive"
+files.required = ["package.json"]
+
+[[rules.layout]]
+target = "packages/vite-express-rsc"
+mode = "permissive"
+files.required = ["src/plugin.ts"]
+
+[[rules.layout]]
+target = "packages/oapi"
+mode = "permissive"
+files.required = ["src/index.ts"]
+
+[[rules.layout]]
+target = "examples/*"
+mode = "permissive"
+files.required = ["package.json", "vite.config.ts", "src/index.ts"]
+
+[[rules.filename]]
+target = ["packages/*/src/**", "tests/*"]
+kind = "file"
+max_words = 2
+
+[[rules."forbidden-words"]]
+target = "packages/*/src/**"
+words = ["helpers", "misc", "utils"]

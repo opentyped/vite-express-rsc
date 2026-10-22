@@ -1,0 +1,38 @@
+{
+  "name": "@opentyped/vite-express-rsc-oapi",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "@opentyped/oapi-ast": "0.5.0",
+    "@opentyped/oapi-compiler": "0.5.0",
+    "typescript": "5.9.3"
+  },
+  "devDependencies": {
+    "@opentyped/oapi-tsgen": "0.5.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepare": "npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/opentyped/vite-express-rsc.git",
+    "directory": "packages/oapi"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
+  }
+}
