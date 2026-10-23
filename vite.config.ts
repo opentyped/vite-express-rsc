@@ -1,11 +1,11 @@
 import { defineConfig } from "vite";
-import { fullstack } from "@opentyped/vite-express-rsc";
+import { expressRsc } from "@opentyped/vite-express-rsc";
 
 export default defineConfig({
+  build: { rollupOptions: { input: "./tests/fixture/src/index.ts" } },
   plugins: [
-    fullstack({
-      entry: "./examples/basic/src/index.ts",
-      directory: "./examples/basic/src/app",
+    expressRsc({
+      directory: "./tests/fixture/src/app",
     }),
   ],
 });

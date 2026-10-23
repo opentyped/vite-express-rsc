@@ -17,6 +17,7 @@
     "examples/**/*.tsx",
     "vite.config.ts",
     "tests/**/*.ts",
+    "tests/**/*.tsx",
     "eslint.config.ts"
   ],
   "exclude": ["**/dist", "**/node_modules"]

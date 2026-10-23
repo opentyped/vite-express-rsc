@@ -1,187 +1,170 @@
 import {
   createTemporaryReferenceSet,
-  decodeAction,
-  decodeFormState,
-  decodeReply,
   renderToReadableStream,
 } from "@vitejs/plugin-rsc/rsc";
 import { unstable_matchRSCServerRequest as match } from "react-router";
-import type { Request, Response, NextFunction } from "express";
-import { createRequest, createHeaders } from "@remix-run/node-fetch-server";
-import { randomUUID } from "node:crypto";
-import { definitions } from "virtual:express-rsc/routes";
-import clientVersion from "virtual:express-rsc/version";
-import { createRoutes } from "./routes.js";
-import { withRequestContext } from "./context.js";
+import type { Request, Response, RequestHandler } from "express";
+import { tree } from "virtual:express/rsc/routes";
+import clientVersion from "virtual:express/rsc/version";
+import { withRequestContext, type RequestContext } from "./context.js";
+import { createRoutes, flatten } from "./routes.js";
 import { rendering, type RenderState } from "./state.js";
-import { matchDefinitions, modules, prepare } from "./prepare.js";
-import { endpoint } from "./express.js";
+import { handlers, load } from "./express.js";
+import { resolveMetadata } from "./metadata.js";
 import { sendResponse } from "./response.js";
+import type { Preflight } from "./router.js";
+import type { Endpoint } from "../routes.js";
+import type { PageProps, RouteModule } from "./types.js";
 
-const routes = createRoutes(definitions);
+const routes = createRoutes(tree);
+const modules = flatten(tree);
 
-/**
- * Bridge Express state into the RSC graph without sharing context storage across
- * environments.
- */
-export async function dispatch(
-  req: Request,
-  res: Response,
-  next: NextFunction,
-) {
-  const controller = new AbortController();
-  const disconnected = () => {
-    if (!res.writableFinished) {
-      controller.abort(new Error("Client disconnected"));
-    }
-  };
+/** Load the page or layout module registered under a route id. */
+async function moduleOf(id: string): Promise<RouteModule> {
+  const loader = modules.get(id);
 
-  res.once("close", disconnected);
-
-  const context = {
-    signal: controller.signal,
-    nonce: res.locals.nonce,
-    requestId: res.locals.requestId ?? randomUUID(),
-    user: res.locals.user,
-    headers: createHeaders(req),
-    services: res.locals.services,
-  };
-
-  try {
-    return await withRequestContext(context, () =>
-      dispatchRequest(req, res, next),
-    );
-  } finally {
-    res.off("close", disconnected);
+  if (!loader) {
+    throw new Error(`Unknown route module: ${id}`);
   }
+
+  return loader();
 }
 
-async function dispatchRequest(
+/**
+ * Return the `middlewares` exported by pages and layouts. They run in Express's
+ * chain, but their code belongs to this graph, so each call enters this graph's
+ * request context.
+ */
+export async function middlewares(
+  ids: string[],
+  context: RequestContext,
+): Promise<Record<string, RequestHandler[]>> {
+  const result: Record<string, RequestHandler[]> = {};
+
+  for (const id of ids) {
+    result[id] = handlers((await moduleOf(id)).middlewares).map(
+      (handler): RequestHandler =>
+        (req, res, next) =>
+          withRequestContext(context, () => handler(req, res, next)),
+    );
+  }
+
+  return result;
+}
+
+/** Plain string params for loaders and metadata; catch-alls become `a/b`. */
+function paramsOf(req: Request): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(req.params as Record<string, string | string[]>).map(
+      ([key, value]) => [key, Array.isArray(value) ? value.join("/") : value],
+    ),
+  );
+}
+
+/** Run layout and page loaders outer-to-inner, then resolve metadata. */
+async function prepare(
   req: Request,
   res: Response,
-  next: NextFunction,
+  endpoint: Endpoint,
+  state: RenderState,
 ) {
-  // These are the reserved request suffixes of the pinned React Router RSC runtime.
-  const url = new URL(req.originalUrl, "http://localhost");
-  const rsc = url.pathname.endsWith(".rsc");
-  const manifest = url.pathname.endsWith(".manifest");
-  const pathname = rsc ? url.pathname.slice(0, -4) || "/" : url.pathname;
-  const branch = manifest ? [] : matchDefinitions(definitions, pathname);
-  const last = branch.at(-1)?.definition;
-  const loaded = await modules(branch);
-  const raw =
-    !rsc &&
-    !manifest &&
-    loaded.route &&
-    ((req.method !== "GET" && req.method !== "HEAD") || !loaded.page);
+  const params = paramsOf(req);
+  const chain: { id: string; module: RouteModule; props: PageProps }[] = [];
+
+  for (const id of [...endpoint.layouts, endpoint.page!]) {
+    state.terminalId = id;
+
+    const module = await moduleOf(id);
+    const loaderData = module.loader
+      ? await load(req, res, module.loader)
+      : undefined;
+
+    state.results.set(id, loaderData);
+    chain.push({ id, module, props: { loaderData, params } });
+  }
+
+  state.metadata = await resolveMetadata(chain);
+  state.terminalId = undefined;
+}
+
+export interface RenderOptions {
+  /** The matched page; absent for route discovery and unknown navigations. */
+  endpoint?: Endpoint;
+  context: RequestContext;
+  preflight: Preflight;
+}
+
+/** Render a page document or navigation payload through React Router. */
+export async function render(
+  req: Request,
+  res: Response,
+  { endpoint, context, preflight }: RenderOptions,
+) {
   const state: RenderState = {
     results: new Map(),
     metadata: {},
-    params: branch.at(-1)?.params ?? {},
-    page: last,
+    terminal: preflight.terminal,
+    terminalId: preflight.terminalId,
   };
 
-  await prepare(req, res, loaded, state, !raw);
-
-  if (res.destroyed) {
-    return;
-  }
-
-  if (raw) {
-    if (state.terminal instanceof globalThis.Response) {
-      throw state.terminal;
+  await withRequestContext(context, async () => {
+    if (endpoint && state.terminal === undefined) {
+      try {
+        await prepare(req, res, endpoint, state);
+      } catch (error) {
+        state.terminal = error ?? new Error("Loader threw an empty value");
+      }
     }
 
-    if (state.terminal === true) {
-      return;
-    }
-
-    if (state.terminal) {
-      throw state.terminal;
-    }
-
-    if (await endpoint(req, res, loaded.route!, !!loaded.page)) {
-      return;
-    }
-
-    next();
-
-    return;
-  }
-
-  if (req.method !== "GET" && req.method !== "HEAD") {
-    if (state.terminal instanceof globalThis.Response) {
-      await sendResponse(res, state.terminal);
-
-      return;
-    }
+    let request = new globalThis.Request(context.url, {
+      method: req.method,
+      headers: context.headers,
+      signal: context.signal,
+    });
 
     if (state.terminal !== undefined) {
-      throw state.terminal;
+      // A client-chosen `_routes` filter must not skip the route that failed.
+      const url = new URL(request.url);
+
+      url.searchParams.delete("_routes");
+      request = new globalThis.Request(url, request);
     }
 
-    res.set("Allow", "GET, HEAD").status(405).end();
+    const response = await rendering.run(state, async () => {
+      const payload = await match({
+        request,
+        routes,
+        clientVersion,
+        basename: req.baseUrl || undefined,
+        createTemporaryReferenceSet,
+        loadServerAction: async () => {
+          throw new Error("Server functions are disabled; use route.ts");
+        },
+        /** Encode React Router's result, keeping a status chosen by Express handlers. */
+        generateResponse(result, options) {
+          const headers = new Headers(result.headers);
 
-    return;
-  }
+          headers.set("Content-Type", "text/x-component");
 
-  if (!manifest && !loaded.page && state.terminal === undefined) {
-    state.terminal = new globalThis.Response("Not found", { status: 404 });
-    state.terminalId = last?.id;
-  }
+          return new globalThis.Response(
+            renderToReadableStream(result.payload, options),
+            {
+              status:
+                result.statusCode === 200 ? res.statusCode : result.statusCode,
+              headers,
+            },
+          );
+        },
+      });
+      const ssr = await import.meta.viteRsc.loadModule<
+        typeof import("./ssr.js")
+      >("ssr", "render");
 
-  let request = createRequest(req, res);
-
-  if (state.terminal !== undefined) {
-    // A caller-controlled partial-loader filter cannot suppress a guard/error loader.
-    const target = new URL(request.url);
-
-    target.searchParams.delete("_routes");
-    request = new globalThis.Request(target, request);
-  }
-
-  const response = await rendering.run(state, async () => {
-    const serverResponse = await match({
-      request,
-      routes,
-      clientVersion,
-      createTemporaryReferenceSet,
-      decodeAction,
-      decodeFormState,
-      decodeReply,
-      loadServerAction: async () => {
-        throw new Error("Server functions are disabled; use route.ts");
-      },
-      generateResponse(result, options) {
-        const headers = new Headers(result.headers);
-
-        headers.set("Content-Type", "text/x-component");
-
-        // Express response fields are staged until React Router's protocol has decided the response.
-        const status =
-          result.statusCode === 200 ? res.statusCode : result.statusCode;
-
-        return new globalThis.Response(
-          renderToReadableStream(result.payload, options),
-          { status, headers },
-        );
-      },
+      return ssr.generateHTML(request, payload, context.nonce);
     });
-    const ssr = await import.meta.viteRsc.loadModule<typeof import("./ssr.js")>(
-      "ssr",
-      "render",
-    );
 
-    const nonce: unknown = res.locals.nonce;
-
-    if (nonce !== undefined && typeof nonce !== "string") {
-      throw new TypeError("res.locals.nonce must be a string when supplied");
-    }
-
-    return ssr.generateHTML(request, serverResponse, nonce);
+    await sendResponse(res, response);
   });
-
-  await sendResponse(res, response);
 }
 
 if (import.meta.hot) {

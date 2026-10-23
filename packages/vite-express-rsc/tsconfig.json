@@ -8,7 +8,10 @@
     "sourceMap": false,
     "noEmit": false,
     "allowJs": false,
-    "noEmitOnError": true
+    "noEmitOnError": true,
+    "paths": {
+      "@opentyped/vite-express-rsc": ["./src/plugin.ts"]
+    }
   },
   "include": ["src"],
   "exclude": ["dist"]

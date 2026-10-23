@@ -8,6 +8,7 @@ import {
   type unstable_RSCPayload as Payload,
 } from "react-router/dom";
 
+// Decode the initial server response and attach React to the existing HTML.
 createFromReadableStream<Payload>(getRSCStream()).then((payload) => {
   startTransition(async () => {
     hydrateRoot(

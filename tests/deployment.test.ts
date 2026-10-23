@@ -9,6 +9,7 @@ import {
   rmSync,
   writeFileSync,
   mkdirSync,
+  renameSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -16,14 +17,17 @@ import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 
 const root = resolve(import.meta.dirname, "..");
+/** Read dependency declarations from a package manifest. */
 const read = (
   file: string,
 ): {
   dependencies: Record<string, string>;
   devDependencies: Record<string, string>;
 } => JSON.parse(readFileSync(file, "utf8"));
+/** Write a JSON file used by the isolated installation. */
 const write = (file: string, value: unknown) =>
   writeFileSync(file, JSON.stringify(value, null, 2));
+/** Run an npm command inside the fixture and fail if it does not finish. */
 const npm = (args: string[], cwd: string) =>
   execFileSync("npm", args, {
     cwd,
@@ -65,11 +69,24 @@ test(
 
       const application = join(directory, "application");
 
-      cpSync(join(root, "examples/basic"), application, {
+      cpSync(join(root, "tests/fixture"), application, {
         recursive: true,
         filter: (file) =>
           !["dist", "node_modules"].includes(file.split("/").at(-1)!),
       });
+
+      // Use a different directory name; nothing generated should depend on it.
+      renameSync(
+        join(application, "src/app"),
+        join(application, "src/screens"),
+      );
+
+      const configFile = join(application, "vite.config.ts");
+
+      writeFileSync(
+        configFile,
+        readFileSync(configFile, "utf8").replace("./src/app", "./src/screens"),
+      );
 
       const entry = join(application, "src/index.ts");
 
@@ -107,7 +124,7 @@ test(
           esModuleInterop: true,
           skipLibCheck: false,
           noEmit: true,
-          types: ["node", "@opentyped/vite-express-rsc/types"],
+          types: ["node", "vite/client", "@opentyped/vite-express-rsc/types"],
         },
         include: ["src", "vite.config.ts"],
       });
@@ -121,8 +138,9 @@ test(
         ],
         application,
       );
-      npm(["exec", "--", "tsc", "--noEmit"], application);
       npm(["run", "build"], application);
+      assert.equal(existsSync(join(application, "src/screens.d.ts")), false);
+      npm(["exec", "--", "tsc", "--noEmit"], application);
 
       const deployed = join(directory, "deployed");
 

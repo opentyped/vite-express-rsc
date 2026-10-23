@@ -5,6 +5,7 @@ import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import { sendResponse } from "../packages/vite-express-rsc/dist/runtime/response.js";
 
+/** Start a local HTTP fixture and expose a cleanup function. */
 async function listen(handler: RequestListener) {
   const server = createServer(handler);
 
@@ -17,6 +18,7 @@ async function listen(handler: RequestListener) {
 
   return {
     url: `http://127.0.0.1:${address.port}`,
+    /** Close test connections and stop the fixture listener. */
     async close() {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -27,6 +29,7 @@ async function listen(handler: RequestListener) {
 test("renderer transport preserves cookies and streams before completion", async () => {
   const server = await listen((_req, res) => {
     const body = new ReadableStream<Uint8Array>({
+      /** Produce two delayed chunks to verify that the response is actually streamed. */
       async start(controller) {
         controller.enqueue(new TextEncoder().encode("first"));
         await delay(150);
@@ -68,9 +71,11 @@ test("disconnect cancels a backpressured renderer without waiting forever for dr
   const completed = new Promise<void>((resolve) => (sent = resolve));
   const server = await listen((_req, res) => {
     const body = new ReadableStream<Uint8Array>({
+      /** Keep producing chunks so the client can create backpressure. */
       pull(controller) {
         controller.enqueue(new Uint8Array(1024 * 1024));
       },
+      /** Record that disconnecting the client canceled the renderer. */
       cancel() {
         canceled();
       },
@@ -104,6 +109,7 @@ test("HEAD cancels its renderer body rather than leaving it unconsumed", async (
   let canceled = false;
   const server = await listen((_req, res) => {
     const body = new ReadableStream<Uint8Array>({
+      /** Record that a HEAD request canceled its unused response body. */
       cancel() {
         canceled = true;
       },

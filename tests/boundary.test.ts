@@ -19,6 +19,7 @@ test("Vite enforces server-only boundaries in actual browser builds", () => {
   mkdirSync(cache, { recursive: true });
 
   const directory = mkdtempSync(join(cache, "express-rsc-boundary-"));
+  /** Write a source file for the isolated build fixture. */
   const put = (file: string, source: string) => {
     const target = join(directory, file);
 
@@ -26,6 +27,7 @@ test("Vite enforces server-only boundaries in actual browser builds", () => {
     writeFileSync(target, source);
   };
 
+  /** Build the fixture with the real Vite command. */
   const build = () =>
     execFileSync(
       process.execPath,
@@ -37,11 +39,11 @@ test("Vite enforces server-only boundaries in actual browser builds", () => {
     put("package.json", JSON.stringify({ type: "module" }));
     put(
       "vite.config.ts",
-      `import {defineConfig} from "vite"; import {fullstack} from "@opentyped/vite-express-rsc"; export default defineConfig({plugins:[fullstack({entry:"./index.ts", directory:"./app"})]});`,
+      `import {defineConfig} from "vite"; import {expressRsc} from "@opentyped/vite-express-rsc"; export default defineConfig({build:{rollupOptions:{input:"./index.ts"}}, plugins:[expressRsc({directory:"./app"})]});`,
     );
     put(
       "index.ts",
-      `import express from "express"; import {appRouter} from "@opentyped/vite-express-rsc/app"; const app=express(); app.use(appRouter); export const listener=app.listen(0);`,
+      `import express from "express"; import appRouter from "express/rsc/bundle"; const app=express(); app.use(appRouter); export const listener=app.listen(0);`,
     );
     put(
       "db.ts",
@@ -74,8 +76,33 @@ test("Vite enforces server-only boundaries in actual browser builds", () => {
       assert.ok(error && typeof error === "object" && "stderr" in error);
       assert.match(
         String(error.stderr),
-        /server-only.*cannot be imported|cannot be imported.*client/s,
+        /db.ts is outside app and cannot be imported by browser code/,
       );
+
+      return true;
+    });
+
+    // Project files outside the route directory never reach the browser, without any marker.
+    put("server/token.ts", `export const token = "server-directory-marker";`);
+    put(
+      "app/Counter.tsx",
+      `"use client"; import {token} from "../server/token"; export default function Counter(){return <button>{token}</button>}`,
+    );
+    assert.throws(build, (error: unknown) => {
+      assert.ok(error && typeof error === "object" && "stderr" in error);
+      assert.match(String(error.stderr), /server\/token.ts is outside app/);
+
+      return true;
+    });
+
+    // A bundle name that the configuration does not declare fails the build.
+    put(
+      "index.ts",
+      `import express from "express"; import admin from "express/rsc/bundle/admin"; express().use(admin);`,
+    );
+    assert.throws(build, (error: unknown) => {
+      assert.ok(error && typeof error === "object" && "stderr" in error);
+      assert.match(String(error.stderr), /Unknown bundle "admin"/);
 
       return true;
     });

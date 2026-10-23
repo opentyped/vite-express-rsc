@@ -1,28 +1,78 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { join, basename } from "node:path";
+import { join } from "node:path";
 import { parse } from "@babel/parser";
 
 export const methods = [
-  "HEAD",
   "GET",
+  "HEAD",
   "POST",
   "PUT",
   "PATCH",
   "DELETE",
   "OPTIONS",
-];
+] as const;
 
-const filenames = new Set([
-  "page.tsx",
-  "layout.tsx",
-  "middleware.ts",
-  "route.ts",
-  "routes.tsx",
-  "loading.tsx",
-  "error.tsx",
-]);
+/** Convention filenames and the role each one plays in a directory. */
+const conventions = {
+  "page.tsx": "page",
+  "layout.tsx": "layout",
+  "middleware.ts": "middleware",
+  "route.ts": "route",
+  "routes.tsx": "route",
+  "loading.tsx": "loading",
+  "error.tsx": "error",
+} as const;
 
-export function discover(directory: string): string[] {
+type Role = (typeof conventions)[keyof typeof conventions];
+
+/** One directory of the route tree. Ids match React Router route ids. */
+export interface RouteNode {
+  /** Layout route id, e.g. `layout:guarded`. */
+  id: string;
+  /** Page route id, e.g. `page:guarded`. */
+  pageId: string;
+  /** Directory relative to the route root, using `/`. */
+  dir: string;
+  /** React Router path segment: "", "users", ":id" or "*". */
+  segment: string;
+  /** Express path segment: "", "users", ":id" or "*slug". */
+  expressSegment: string;
+  files: Partial<Record<Role, string>>;
+  /** Exported HTTP methods of the raw route module. */
+  methods: string[];
+  /** Whether layout.tsx / page.tsx export `middlewares`. */
+  layoutMiddlewares: boolean;
+  pageMiddlewares: boolean;
+  children: RouteNode[];
+}
+
+/** One step of the inherited guard chain, outermost first. */
+export interface Guard {
+  /** Route id that owns this guard, used to place error boundaries. */
+  id: string;
+  /** Absolute path of the directory's middleware.ts. */
+  middleware?: string;
+  /** Layout id whose `middlewares` export runs here. */
+  layout?: string;
+}
+
+/** One URL registered on the Express router. */
+export interface Endpoint {
+  /** Express path, e.g. `/users/:id` or `/docs/*slug`. */
+  path: string;
+  guards: Guard[];
+  /** Page id rendered for GET/HEAD. */
+  page?: string;
+  pageMiddlewares?: boolean;
+  /** Layout ids from the root to the page, used for loaders and metadata. */
+  layouts: string[];
+  /** Absolute path of route.ts / routes.tsx. */
+  route?: string;
+  methods: string[];
+}
+
+/** List files in a stable order so generated routes are repeatable. */
+function discover(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true })
     .sort((a, b) => a.name.localeCompare(b.name, "en"))
     .flatMap((entry) =>
@@ -34,27 +84,33 @@ export function discover(directory: string): string[] {
     );
 }
 
-export function segment(name: string): string {
+/** Turn a folder name into React Router and Express segments. */
+function segmentOf(name: string): { segment: string; express: string } {
   if (/^\([\w-]+\)$/.test(name)) {
-    return "";
+    return { segment: "", express: "" };
   }
 
-  if (/^\[\.\.\.[A-Za-z_]\w*\]$/.test(name)) {
-    return "*";
+  const splat = /^\[\.\.\.([A-Za-z_]\w*)\]$/.exec(name);
+
+  if (splat) {
+    return { segment: "*", express: "*" + splat[1] };
   }
 
-  if (/^\[[A-Za-z_]\w*\]$/.test(name)) {
-    return ":" + name.slice(1, -1);
+  const param = /^\[([A-Za-z_]\w*)\]$/.exec(name);
+
+  if (param) {
+    return { segment: ":" + param[1], express: ":" + param[1] };
   }
 
   if (!/^[\w-]+$/.test(name)) {
     throw new Error(`Unsupported route segment: ${name}`);
   }
 
-  return name;
+  return { segment: name, express: name };
 }
 
-function exportsOf(file: string): Set<string> {
+/** Read export names and directives without executing application code. */
+function exportsOf(file: string, role: Role): Set<string> {
   const ast = parse(readFileSync(file, "utf8"), {
     sourceType: "module",
     plugins: file.endsWith(".tsx") ? ["typescript", "jsx"] : ["typescript"],
@@ -63,10 +119,7 @@ function exportsOf(file: string): Set<string> {
     (directive) => directive.value.value === "use client",
   );
 
-  if (
-    client &&
-    ["route.ts", "routes.tsx", "middleware.ts"].includes(basename(file))
-  ) {
+  if (client && (role === "route" || role === "middleware")) {
     throw new Error(
       `Express route and middleware modules cannot use the use-client directive: ${file}`,
     );
@@ -94,7 +147,7 @@ function exportsOf(file: string): Set<string> {
 
     for (const specifier of statement.specifiers) {
       if (
-        specifier.type !== "ExportSpecifier" ||
+        specifier.type === "ExportSpecifier" &&
         specifier.exportKind !== "type"
       ) {
         names.add(
@@ -107,22 +160,20 @@ function exportsOf(file: string): Set<string> {
 
     const declaration = statement.declaration;
 
-    if (
+    if (declaration?.type === "VariableDeclaration") {
+      for (const item of declaration.declarations) {
+        if (item.id.type !== "Identifier") {
+          throw new Error(`Use named export bindings in ${file}`);
+        }
+
+        names.add(item.id.name);
+      }
+    } else if (
       declaration &&
       "id" in declaration &&
       declaration.id?.type === "Identifier"
     ) {
       names.add(declaration.id.name);
-    }
-
-    for (const item of declaration?.type === "VariableDeclaration"
-      ? declaration.declarations
-      : []) {
-      if (item.id.type !== "Identifier") {
-        throw new Error(`Use named export bindings in ${file}`);
-      }
-
-      names.add(item.id.name);
     }
   }
 
@@ -135,173 +186,288 @@ function exportsOf(file: string): Set<string> {
     );
   }
 
-  if (names.has("mount")) {
-    throw new Error(`Replace mount() with export const middlewares in ${file}`);
-  }
-
   if (names.has("action") || names.has("clientAction")) {
     throw new Error(
-      `Actions are disabled; export HTTP methods from route.ts: ${file}`,
+      `Actions are not supported; export HTTP methods from route.ts: ${file}`,
     );
   }
 
   return names;
 }
 
-interface RouteDefinition {
-  id: string;
-  path: string;
-  files: Record<string, { file: string; methods: string[] }>;
-  children: Map<string, RouteDefinition>;
+/** Create an empty directory node. */
+function node(dir: string, parent?: RouteNode): RouteNode {
+  const name = dir.split("/").at(-1) ?? "";
+  const { segment, express } = dir
+    ? segmentOf(name)
+    : { segment: "", express: "" };
+
+  if (parent?.segment === "*") {
+    throw new Error(`Catch-all routes cannot have child routes: ${dir}`);
+  }
+
+  return {
+    id: "layout:" + dir,
+    pageId: "page:" + dir,
+    dir,
+    segment,
+    expressSegment: express,
+    files: {},
+    methods: [],
+    layoutMiddlewares: false,
+    pageMiddlewares: false,
+    children: [],
+  };
 }
 
-/**
- * Generate source imports during compilation; production never scans route
- * directories.
- */
-export function definitions(directory: string): string {
-  const root: RouteDefinition = {
-    id: "layout:",
-    path: "",
-    files: {},
-    children: new Map(),
-  };
-  const endpoints = new Map<string, string>();
-  const owners = new Map<string, string>();
+/** Scan the route directory into a validated tree. */
+export function scan(directory: string): RouteNode {
+  const root = node("");
+  const nodes = new Map([["", root]]);
 
   for (const file of discover(directory)) {
     const parts = file.split("/");
     const filename = parts.pop()!;
+    const role = conventions[filename as keyof typeof conventions];
 
-    if (!filenames.has(filename)) {
+    if (!role) {
       continue;
     }
 
-    const raw = filename === "route.ts" || filename === "routes.tsx";
-    const names = exportsOf(join(directory, file));
+    // Create every directory node between the root and this file.
+    let current = root;
 
-    if (!raw && !names.has("default")) {
-      throw new Error(`Expected a default export in ${file}`);
-    }
+    for (let i = 1; i <= parts.length; i++) {
+      const dir = parts.slice(0, i).join("/");
+      let next = nodes.get(dir);
 
-    if (raw && !methods.some((method) => names.has(method))) {
-      throw new Error(`Export an HTTP method from ${file}`);
-    }
-
-    const parameters = new Set<string>();
-
-    for (const part of parts) {
-      if (/^\[[A-Za-z_]\w*\]$/.test(part)) {
-        const parameter = part.slice(1, -1);
-
-        if (parameters.has(parameter)) {
-          throw new Error(
-            `Duplicate dynamic parameter '${parameter}' in ${file}`,
-          );
-        }
-
-        parameters.add(parameter);
-      }
-    }
-
-    const paths = parts.map(segment);
-
-    if (paths.includes("*") && paths.at(-1) !== "*") {
-      throw new Error(`Catch-all must be the final URL segment: ${file}`);
-    }
-
-    const path = paths.filter(Boolean).join("/");
-    const exportedMethods =
-      filename === "page.tsx"
-        ? ["GET", "HEAD"]
-        : raw
-          ? methods.filter((method) => names.has(method))
-          : [];
-
-    if (raw && names.has("GET") && !names.has("HEAD")) {
-      exportedMethods.push("HEAD");
-    }
-
-    for (const method of exportedMethods) {
-      const key =
-        method + ":" + path.replace(/:[^/]+/g, ":param").toLowerCase();
-
-      if (endpoints.has(key)) {
-        throw new Error(
-          `Conflicting routes (${method}): ${endpoints.get(key)} and ${file}`,
-        );
+      if (!next) {
+        next = node(dir, current);
+        nodes.set(dir, next);
+        current.children.push(next);
       }
 
-      endpoints.set(key, file);
+      current = next;
     }
 
-    if (exportedMethods.length) {
-      const pattern = path.replace(/:[^/]+/g, ":param").toLowerCase();
-      const owner = parts.join("/");
+    const absolute = join(directory, file);
+    const names = exportsOf(absolute, role);
 
-      if (owners.has(pattern) && owners.get(pattern) !== owner) {
-        throw new Error(
-          `Conflicting routes in separate directory branches: ${owners.get(pattern)} and ${owner}`,
-        );
-      }
-
-      owners.set(pattern, owner);
-    }
-
-    let node = root;
-
-    for (let i = 0; i < parts.length; i++) {
-      const name = parts[i];
-
-      if (!node.children.has(name)) {
-        node.children.set(name, {
-          id: "layout:" + parts.slice(0, i + 1).join("/"),
-          path: paths[i],
-          files: {},
-          children: new Map(),
-        });
-      }
-
-      node = node.children.get(name)!;
-    }
-
-    const key = raw ? "route.ts" : filename;
-
-    if (node.files[key]) {
+    if (current.files[role]) {
       throw new Error(`Use only one raw route module per directory: ${file}`);
     }
 
-    node.files[key] = {
-      file: join(directory, file),
-      methods: exportedMethods,
-    };
-  }
+    current.files[role] = absolute;
 
-  const validate = (node: RouteDefinition): void => {
-    if (node.path === "*" && (node.children.size || node.files["layout.tsx"])) {
-      throw new Error(
-        `Catch-all routes must be leaves without a layout: ${node.id}`,
-      );
+    if (role === "route") {
+      current.methods = methods.filter((method) => names.has(method));
+
+      if (!current.methods.length) {
+        throw new Error(`Export an HTTP method from ${file}`);
+      }
+    } else if (!names.has("default")) {
+      throw new Error(`Expected a default export in ${file}`);
     }
 
-    for (const child of node.children.values()) {
-      validate(child);
+    if (role === "layout") {
+      current.layoutMiddlewares = names.has("middlewares");
+    }
+
+    if (role === "page") {
+      current.pageMiddlewares = names.has("middlewares");
+    }
+  }
+
+  validate(root, []);
+
+  return root;
+}
+
+/** Reject duplicate parameters and layouts that would hide a catch-all. */
+function validate(current: RouteNode, params: string[]) {
+  const name = current.segment.startsWith(":")
+    ? current.segment.slice(1)
+    : current.segment === "*"
+      ? current.expressSegment.slice(1)
+      : undefined;
+
+  if (name && params.includes(name)) {
+    throw new Error(`Duplicate dynamic parameter '${name}' in ${current.dir}`);
+  }
+
+  if (current.segment === "*" && current.files.layout) {
+    throw new Error(
+      `Catch-all routes must be leaves without a layout: ${current.id}`,
+    );
+  }
+
+  for (const child of current.children) {
+    validate(child, name ? [...params, name] : params);
+  }
+}
+
+/** The React Router id of a node's own route; a catch-all page replaces its layout. */
+export function routeIdOf(current: RouteNode): string {
+  return current.segment === "*" && current.files.page
+    ? current.pageId
+    : current.id;
+}
+
+/** Rank a segment: static before dynamic before catch-all. */
+const rank = (part: string) =>
+  part.startsWith("*") ? 2 : part.startsWith(":") ? 1 : 0;
+
+/** Order more specific paths first so Express matches them before broader ones. */
+function compare(a: Endpoint, b: Endpoint): number {
+  const left = a.path.split("/").filter(Boolean);
+  const right = b.path.split("/").filter(Boolean);
+
+  for (let i = 0; i < Math.min(left.length, right.length); i++) {
+    const order =
+      rank(left[i]) - rank(right[i]) || left[i].localeCompare(right[i], "en");
+
+    if (order) {
+      return order;
+    }
+  }
+
+  return left.length - right.length;
+}
+
+/** Flatten the tree into Express registrations and reject conflicting URLs. */
+export function endpoints(root: RouteNode): Endpoint[] {
+  const result: Endpoint[] = [];
+  const owners = new Map<string, RouteNode>();
+
+  /** Visit one directory with the guards and layouts it inherits. */
+  const visit = (
+    current: RouteNode,
+    path: string[],
+    guards: Guard[],
+    layouts: string[],
+  ) => {
+    const here = current.expressSegment
+      ? [...path, current.expressSegment]
+      : path;
+    const own: Guard = { id: routeIdOf(current) };
+
+    if (current.files.middleware) {
+      own.middleware = current.files.middleware;
+    }
+
+    if (current.layoutMiddlewares) {
+      own.layout = current.id;
+    }
+
+    const inherited = own.middleware || own.layout ? [...guards, own] : guards;
+    const nested = current.files.layout ? [...layouts, current.id] : layouts;
+
+    if (current.files.page || current.files.route) {
+      const methods = current.methods;
+
+      if (current.files.page && methods.includes("GET")) {
+        throw new Error(
+          `Conflicting routes (GET): ${current.files.page} and ${current.files.route}`,
+        );
+      }
+
+      const endpoint: Endpoint = {
+        path: "/" + here.join("/"),
+        guards: inherited,
+        layouts: nested,
+        methods,
+      };
+
+      if (current.files.page) {
+        endpoint.page = current.pageId;
+        endpoint.pageMiddlewares = current.pageMiddlewares;
+      }
+
+      if (current.files.route) {
+        endpoint.route = current.files.route;
+      }
+
+      // Parameter names are irrelevant to matching, so `/:id` and `/:name` collide.
+      const pattern = endpoint.path
+        .replace(/:\w+/g, ":")
+        .replace(/\*\w+/g, "*")
+        .toLowerCase();
+      const owner = owners.get(pattern);
+
+      if (owner) {
+        throw new Error(
+          `Conflicting routes for ${endpoint.path}: ${owner.dir || "/"} and ${current.dir}`,
+        );
+      }
+
+      owners.set(pattern, current);
+      result.push(endpoint);
+    }
+
+    for (const child of current.children) {
+      visit(child, here, inherited, nested);
     }
   };
 
-  validate(root);
+  visit(root, [], [], []);
 
-  const emit = (node: RouteDefinition): string =>
-    `{id:${JSON.stringify(node.id)},path:${JSON.stringify(node.path)},files:{${Object.entries(
-      node.files,
+  return result.sort(compare);
+}
+
+/** Generate the React Router route tree with lazy page and layout imports (RSC graph). */
+export function rscModule(root: RouteNode): string {
+  /** Write one lazy import, or `undefined` when the file does not exist. */
+  const lazy = (file: string | undefined) =>
+    file ? `() => import(${JSON.stringify(file)})` : "undefined";
+
+  /** Write one node and its children. */
+  const emit = (current: RouteNode): string =>
+    `{ id: ${JSON.stringify(current.id)}, pageId: ${JSON.stringify(current.pageId)}, path: ${JSON.stringify(current.segment)}, ` +
+    (current.segment === "*"
+      ? `splat: ${JSON.stringify(current.expressSegment.slice(1))}, `
+      : "") +
+    `page: ${lazy(current.files.page)}, layout: ${lazy(current.files.layout)}, ` +
+    `loading: ${lazy(current.files.loading)}, error: ${lazy(current.files.error)}, ` +
+    `children: [${current.children.map(emit).join(", ")}] }`;
+
+  return `export const tree = ${emit(root)};\n`;
+}
+
+/** Generate the Express router module with lazy native imports (Node graph). */
+export function routerModule(root: RouteNode, runtime: string): string {
+  const list = endpoints(root);
+  const files = new Set<string>();
+
+  for (const endpoint of list) {
+    for (const guard of endpoint.guards) {
+      if (guard.middleware) {
+        files.add(guard.middleware);
+      }
+    }
+
+    if (endpoint.route) {
+      files.add(endpoint.route);
+    }
+  }
+
+  const modules = [...files]
+    .map(
+      (file) =>
+        `  ${JSON.stringify(file)}: () => import(${JSON.stringify(file)}),`,
     )
-      .map(
-        ([name, { file, methods }]) =>
-          `${JSON.stringify(name)}:{load:()=>import(${JSON.stringify(file)}),methods:${JSON.stringify(methods)}}`,
-      )
-      .join(
-        ",",
-      )}},children:[${[...node.children.values()].map(emit).join(",")}]}`;
+    .join("\n");
 
-  return `export const definitions=[${emit(root)}];`;
+  return `import { createRouter } from ${JSON.stringify(runtime)};
+
+export default createRouter({
+  endpoints: ${JSON.stringify(list, null, 2)},
+  modules: {
+${modules}
+  },
+});
+
+if (import.meta.hot) {
+  import.meta.hot.accept();
+}
+`;
 }

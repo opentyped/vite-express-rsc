@@ -6,6 +6,11 @@ import type { CompiledRoute, HttpMethod, RouteRecord } from "./types.js";
 import { sourceOf } from "@opentyped/oapi-ast/diagnostic";
 import { contracts } from "./contract.js";
 import { metadata, OperationMetadata } from "./metadata.js";
+import {
+  scan,
+  endpoints,
+  methods as httpMethods,
+} from "@opentyped/vite-express-rsc/routes";
 
 export interface FilesystemOptions {
   /** Relative to the generation root, which defaults to the tsconfig directory. */
@@ -14,48 +19,40 @@ export interface FilesystemOptions {
   prefix?: string;
 }
 
-const methods = new Set<string>([
-  "GET",
-  "POST",
-  "PUT",
-  "PATCH",
-  "DELETE",
-  "HEAD",
-  "OPTIONS",
-]);
+const methods = new Set<string>(httpMethods);
 const contributions = new WeakMap<ParserContext, readonly CompiledRoute[]>();
 
-function routePath(
-  file: string,
-  directory: string,
-  prefix: string,
-  node: ts.Node,
-): string {
-  const segments = path
-    .relative(directory, path.dirname(file))
-    .split(path.sep)
-    .filter(Boolean);
-  const parts = segments.flatMap((segment) => {
-    if (/^\([\w-]+\)$/.test(segment)) {
-      return [];
+/**
+ * Map each route module to its URL using the router's own scanner, so the
+ * document can only describe paths that Express actually serves.
+ */
+function routeUrls(directory: string, prefix: string): Map<string, string> {
+  const urls = new Map<string, string>();
+
+  for (const endpoint of endpoints(scan(directory))) {
+    if (endpoint.route) {
+      urls.set(
+        path.resolve(endpoint.route),
+        `${prefix}${endpoint.path}`.replace(/(.)\/$/, "$1"),
+      );
     }
+  }
 
-    if (/^\[[A-Za-z_]\w*\]$/.test(segment)) {
-      return [`{${segment.slice(1, -1)}}`];
-    }
-
-    if (/^[\w-]+$/.test(segment)) {
-      return [segment];
-    }
-
-    return sourceOf(node).fail(
-      `Unsupported OpenAPI route segment ${segment}. Catch-all routes cannot be represented as ordinary OpenAPI path parameters.`,
-    );
-  });
-
-  return `${prefix}/${parts.join("/")}`.replace(/\/$/, "") || "/";
+  return urls;
 }
 
+/** Turn an Express path into an OpenAPI path; catch-alls have no equivalent. */
+function openapiPath(url: string, node: ts.Node): string {
+  if (url.includes("*")) {
+    return sourceOf(node).fail(
+      `Catch-all routes cannot be represented as ordinary OpenAPI path parameters: ${url}`,
+    );
+  }
+
+  return url.replace(/:(\w+)/g, "{$1}");
+}
+
+/** Find the original declaration behind an imported or renamed handler. */
 function resolveSymbol(
   checker: ts.TypeChecker,
   node: ts.Node,
@@ -71,6 +68,7 @@ function resolveSymbol(
 class FilesystemRoutes {
   private readonly options: Required<FilesystemOptions>;
 
+  /** Check the route directory and optional URL prefix before discovering handlers. */
   constructor(options: FilesystemOptions) {
     if (!options?.directory || typeof options.directory !== "string") {
       throw new Error("FilesystemParser requires a route directory.");
@@ -90,6 +88,10 @@ class FilesystemRoutes {
     this.options = { ...options, prefix: prefix.replace(/\/$/, "") };
   }
 
+  /**
+   * Find documented handlers and build a separate checked project for their
+   * contracts.
+   */
   prepare(context: ParserContext): ParserContext {
     if (context.declarations.length) {
       throw new Error(
@@ -104,8 +106,7 @@ class FilesystemRoutes {
     const directory = path.resolve(root, this.options.directory);
     const checker = project.checker;
     const records: RouteRecord[] = [];
-    const seen = new Set();
-    const directories = new Set();
+    const urls = routeUrls(directory, this.options.prefix);
     const sources = project.program
       .getSourceFiles()
       .filter(
@@ -113,29 +114,10 @@ class FilesystemRoutes {
           !source.isDeclarationFile &&
           !project.program.isSourceFileFromExternalLibrary(source),
       )
-      .filter((source) => {
-        const relative = path.relative(directory, source.fileName);
-
-        return (
-          relative &&
-          !relative.startsWith(`..${path.sep}`) &&
-          !path.isAbsolute(relative) &&
-          ["route.ts", "routes.tsx"].includes(path.basename(source.fileName))
-        );
-      })
+      .filter((source) => urls.has(path.resolve(source.fileName)))
       .sort((left, right) => left.fileName.localeCompare(right.fileName, "en"));
 
     for (const source of sources) {
-      const folder = path.dirname(source.fileName);
-
-      if (directories.has(folder)) {
-        sourceOf(source).fail(
-          "A directory cannot contain both route.ts and routes.tsx.",
-        );
-      }
-
-      directories.add(folder);
-
       const symbol = checker.getSymbolAtLocation(source);
       const exports = symbol && checker.getExportsOfModule(symbol);
 
@@ -151,6 +133,10 @@ class FilesystemRoutes {
             ? checker.getAliasedSymbol(exported)
             : exported;
         const declarations: ts.BinaryExpression[] = [];
+        /**
+         * Find this handler's OpenAPI assignment and reject conditional
+         * assignments.
+         */
         const visit = (node: ts.Node): void => {
           if (
             ts.isBinaryExpression(node) &&
@@ -194,21 +180,7 @@ class FilesystemRoutes {
           );
         }
 
-        const url = routePath(
-          source.fileName,
-          directory,
-          this.options.prefix,
-          node,
-        );
-        const key = `${method} ${url.replace(/\{[^}]+\}/g, "{}").toLowerCase()}`;
-
-        if (seen.has(key)) {
-          sourceOf(node).fail(
-            `Conflicting filesystem operation ${method} ${url}.`,
-          );
-        }
-
-        seen.add(key);
+        const url = openapiPath(urls.get(path.resolve(source.fileName))!, node);
 
         const { annotations, extras } = metadata(node.right, checker);
         const name =
@@ -245,6 +217,7 @@ class FilesystemRoutes {
 
     for (const source of project.program.getSourceFiles()) {
       const nodes = new Map<string, ts.Node>();
+      /** Remember original type declarations so generated schema names stay stable. */
       const visit = (node: ts.Node): void => {
         if (
           ts.isInterfaceDeclaration(node) ||
@@ -338,7 +311,7 @@ class FilesystemRoutes {
   }
 }
 
-/** Keep oapi's cached project intact while each parser receives the checked overlay. */
+/** Add filesystem routes to the oapi pipeline without changing its cached project. */
 export function filesystemParsers(
   options: FilesystemOptions,
   defaults: readonly Parser[],
@@ -349,6 +322,7 @@ export function filesystemParsers(
 
   const routes = new FilesystemRoutes(options);
   const overlays = new WeakMap<ParserContext, ParserContext>();
+  /** Copy generated results back while leaving the original project unchanged. */
   const publish = (outer: ParserContext, overlay: ParserContext): void => {
     if (outer === overlay) {
       return;
@@ -373,6 +347,7 @@ export function filesystemParsers(
     {
       name: "express-rsc/endpoints",
       stage: "discover",
+      /** Prepare the request contracts before other discovery steps run. */
       parse(context): void {
         const overlay = routes.prepare(context);
 
@@ -384,6 +359,7 @@ export function filesystemParsers(
       (parser): Parser => ({
         name: parser.name,
         stage: parser.stage,
+        /** Run this oapi step against the checked project and copy its results back. */
         parse(context): void {
           const overlay = overlays.get(context) ?? context;
 
@@ -395,6 +371,7 @@ export function filesystemParsers(
     {
       name: "express-rsc/metadata",
       stage: "document",
+      /** Merge handler annotations into the generated OpenAPI operations. */
       parse(context): void {
         const overlay = overlays.get(context) ?? context;
 
@@ -404,3 +381,5 @@ export function filesystemParsers(
     },
   ];
 }
+
+export { defaultParsers } from "./defaults.js";

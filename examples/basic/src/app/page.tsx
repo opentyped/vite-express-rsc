@@ -1,27 +1,22 @@
-import { Suspense } from "react";
-import { db } from "../server/db";
-import { getRequestContext } from "@opentyped/vite-express-rsc/context";
+import { Link } from "react-router";
+import { getRequestContext } from "express/rsc/context";
+import TodoForm from "./TodoForm";
 
-async function Content() {
-  const before = getRequestContext();
-  const count = await db.user.count();
-  const after = getRequestContext();
-
-  return (
-    <p>
-      Users: {count}; user: {after.user?.id}; request: {before.requestId}/
-      {after.requestId}
-    </p>
-  );
-}
-
+/** A server component: it reads the store directly, no API call needed. */
 export default function Home() {
+  const todos = getRequestContext().locals.todos.list();
+
   return (
     <>
-      <h2>Server rendered home</h2>
-      <Suspense fallback={<p>Loading database…</p>}>
-        <Content />
-      </Suspense>
+      <h1>Todos</h1>
+      <ul>
+        {todos.map((todo) => (
+          <li key={todo.id}>
+            <Link to={`/todos/${todo.id}`}>{todo.title}</Link>
+          </li>
+        ))}
+      </ul>
+      <TodoForm />
     </>
   );
 }

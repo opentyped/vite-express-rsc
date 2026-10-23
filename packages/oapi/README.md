@@ -1,22 +1,34 @@
 # Filesystem Express parser for OpenTyped OAPI
 
 This package adapts the RSC plugin's `route.ts` and `routes.tsx` conventions to
-OAPI 0.1.0's parser pipeline. It reads TypeScript source; it never imports route
+OAPI's parser pipeline. It reads TypeScript source; it never imports route
 modules or executes middleware and handlers.
 
-Use it in an OAPI configuration with the usual compiler/artifact tooling:
+It takes its route list from the plugin's own scanner
+(`@opentyped/vite-express-rsc/routes`), so documented paths are exactly the
+paths Express serves, with the same conflict rules.
 
 ```ts
-import { defineConfig } from "@opentyped/oapi-compiler";
-import { defaultParsers } from "@opentyped/vite/defaults";
-import { filesystemParsers } from "@opentyped/vite-express-rsc-oapi";
+// scripts/openapi.ts
+import { writeFileSync } from "node:fs";
+import { generate } from "@opentyped/oapi-compiler";
+import { generateDefinitions } from "@opentyped/oapi-tsgen";
+import {
+  defaultParsers,
+  filesystemParsers,
+} from "@opentyped/vite-express-rsc-oapi";
 
-export default defineConfig({
-  tsconfig: "tsconfig.json",
-  info: { title: "Application", version: "1.0.0" },
-  parsers: filesystemParsers({ directory: "src/app" }, defaultParsers()),
-  output: { document: "openapi.json", declarations: "openapi.d.ts" },
-});
+const { document } = generate(
+  {
+    tsconfig: "tsconfig.json",
+    info: { title: "Application", version: "1.0.0" },
+    parsers: filesystemParsers({ directory: "src/app" }, defaultParsers()),
+  },
+  defaultParsers,
+);
+
+writeFileSync("openapi.json", JSON.stringify(document, null, 2));
+writeFileSync("openapi.d.ts", generateDefinitions(document));
 ```
 
 The parser provides OAPI `ModelDeclaration` objects. OAPI's normal schema,
@@ -29,7 +41,6 @@ pipelines too.
 ```ts
 // src/app/orders/[id]/route.ts
 import type { RequestHandler } from "express";
-import "@opentyped/vite-express-rsc/types";
 
 export const middlewares = [requireSession];
 
@@ -76,7 +87,7 @@ cannot accurately describe a multi-segment wildcard. Pages, layouts, HTML
 metadata, loading/error components and unannotated handlers are ignored.
 Filesystem route conflicts and duplicate annotations fail generation.
 
-For OAPI 0.1.0, checked input aliases are added in memory to the TypeScript
+Checked input aliases are added in memory to the TypeScript
 program; application files are never rewritten. Filename-derived component
 names escape characters such as brackets and parentheses, with collisions
 reported. Custom namespace rules still follow OAPI's own restrictions. This

@@ -8,22 +8,18 @@ declare global {
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
-import {
-  readFileSync,
-  writeFileSync,
-  mkdirSync,
-  rmSync,
-  readdirSync,
-} from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { once } from "node:events";
 import { resolve } from "node:path";
 import { createServer } from "node:net";
 import { chromium, expect } from "@playwright/test";
 
 const root = resolve(import.meta.dirname, "..");
-const example = resolve(root, "examples/basic");
+const example = resolve(root, "tests/fixture");
+/** Wait briefly before retrying a development update. */
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Retry an assertion while the application or Vite update becomes ready. */
 async function until<T>(callback: () => T | Promise<T>): Promise<T> {
   let error;
 
@@ -39,12 +35,14 @@ async function until<T>(callback: () => T | Promise<T>): Promise<T> {
   throw error;
 }
 
+/** Remove React HTML comments so rendered text is easier to check. */
 const text = (html: string) => html.replace(/<!--.*?-->/gs, "");
 
-async function start(mode: string) {
+/** Start a real development or production server on an available port. */
+async function start(mode: string, requestedPort = 0) {
   const socket = createServer();
 
-  socket.listen(0, "127.0.0.1");
+  socket.listen(requestedPort, "127.0.0.1");
   await once(socket, "listening");
 
   const address = socket.address();
@@ -93,20 +91,22 @@ test(
   "clean production build and dev: Express, RSC, browser and live updates",
   { timeout: 180000 },
   async (t) => {
-    rmSync(resolve(example, "dist"), { recursive: true, force: true });
-    execFileSync("npm", ["run", "build"], { cwd: example, stdio: "pipe" });
     rmSync(resolve(root, "dist"), { recursive: true, force: true });
     execFileSync("npm", ["run", "build"], { cwd: root, stdio: "pipe" });
 
-    const assets = resolve(example, "dist/client/assets");
+    // Build a second browser deployment so the real stale-client handshake is exercised.
+    const counterFile = resolve(example, "src/app/components/Counter.tsx");
+    const counterSource = readFileSync(counterFile, "utf8");
 
-    for (const file of readdirSync(assets)) {
-      assert.ok(
-        !readFileSync(resolve(assets, file), "utf8").includes(
-          "database-server-only-marker",
-        ),
-        file,
+    try {
+      writeFileSync(
+        counterFile,
+        counterSource.replace("<button ", '<button data-deployment="second" '),
       );
+      rmSync(resolve(example, "dist"), { recursive: true, force: true });
+      execFileSync("npm", ["run", "build"], { cwd: example, stdio: "pipe" });
+    } finally {
+      writeFileSync(counterFile, counterSource);
     }
 
     const browser = await chromium.launch({
@@ -207,6 +207,53 @@ test(
               assert.equal(after.canceled, canceledBefore.canceled + 1);
             });
 
+            // Repeated concurrent streams must all finish or cancel, leaving no active work.
+            const beforeLoad = await (
+              await fetch(base + "/streaming/status")
+            ).json();
+
+            for (let round = 0; round < 3; round++) {
+              await Promise.all(
+                Array.from({ length: 12 }, async (_, i) => {
+                  const controller = new AbortController();
+                  const response = await fetch(base + "/streaming", {
+                    signal: controller.signal,
+                  });
+
+                  if (i % 2 === 0) {
+                    const reader = response.body!.getReader();
+                    let body = "";
+
+                    while (!body.includes("Stream pending")) {
+                      const chunk = await reader.read();
+
+                      assert.equal(chunk.done, false);
+                      body += new TextDecoder().decode(chunk.value);
+                    }
+
+                    controller.abort();
+                  } else {
+                    assert.match(await response.text(), /Stream completed/);
+                  }
+                }),
+              );
+            }
+
+            await until(async () => {
+              const afterLoad = await (
+                await fetch(base + "/streaming/status")
+              ).json();
+
+              assert.equal(afterLoad.started - beforeLoad.started, 36);
+              assert.equal(afterLoad.completed - beforeLoad.completed, 18);
+              assert.equal(afterLoad.canceled - beforeLoad.canceled, 18);
+              assert.equal(
+                afterLoad.started,
+                afterLoad.completed + afterLoad.canceled,
+              );
+              assert.equal(child.exitCode, null);
+            });
+
             const documentResponse = await fetch(base);
 
             assert.equal(documentResponse.status, 200);
@@ -232,6 +279,17 @@ test(
               "yes",
             );
             assert.match(html, /Loading database/);
+
+            // Index/trailing-slash RSC URLs must run the same guards as documents.
+            for (const path of ["/_.rsc", "/dashboard/_.rsc"]) {
+              const response = await fetch(base + path);
+
+              assert.equal(response.status, 200, path);
+              assert.match(
+                response.headers.get("content-type") ?? "",
+                /text\/x-component/,
+              );
+            }
 
             const navigation = await fetch(base + "/dashboard/users/42.rsc");
 
@@ -327,6 +385,30 @@ test(
                 );
               }),
             );
+            await Promise.all(
+              Array.from({ length: 20 }, async (_, i) => {
+                const requestId = `native-${i}`;
+                const response = await fetch(base + "/api/native", {
+                  headers: {
+                    "x-user": `native-user-${i}`,
+                    "x-request-id": requestId,
+                  },
+                });
+
+                assert.equal(response.status, 200);
+                assert.equal(
+                  response.headers.get("X-Context-Request"),
+                  requestId,
+                );
+                assert.deepEqual(await response.json(), {
+                  requestId,
+                  user: `native-user-${i}`,
+                  stable: true,
+                  markup: `<span>${requestId}</span>`,
+                });
+              }),
+            );
+
             // Inherited middleware gates every endpoint before data or rendering work.
             await fetch(base + "/api/probe", { method: "POST" });
 
@@ -599,6 +681,7 @@ test(
             );
 
             const errors: string[] = [];
+            /** Collect browser errors so the test can assert that hydration stayed healthy. */
             const onError = (e: Error) => errors.push(e.message);
 
             page.on("pageerror", onError);
@@ -852,6 +935,56 @@ test(
           }
         });
       }
+
+      await t.test("stale browser reloads after deployment", async () => {
+        let server = await start("production-root");
+
+        try {
+          await page.goto(server.base);
+          await expect(page.getByRole("button")).toHaveText("Count: 0");
+          await page.getByRole("button").click();
+          await expect(page.getByRole("button")).toHaveText("Count: 1");
+          await page.evaluate(() => {
+            window.testDocumentMarker = "old deployment";
+          });
+
+          const port = Number(new URL(server.base).port);
+
+          server.child.kill("SIGTERM");
+          await once(server.child, "exit");
+          server = await start("production", port);
+
+          // Revalidation uses an already known route, exercising the payload version check.
+          await page.evaluate(() => {
+            void window.__reactRouterDataRouter!.revalidate();
+          });
+          await page.waitForFunction(
+            () => window.testDocumentMarker === undefined,
+          );
+          await expect(page.getByRole("button")).toHaveAttribute(
+            "data-deployment",
+            "second",
+          );
+          await expect(page.getByRole("button")).toHaveText("Count: 0");
+          await page.getByRole("button").click();
+          await expect(page.getByRole("button")).toHaveText("Count: 1");
+
+          const staleManifest = await fetch(
+            server.base + "/.manifest?version=obsolete&paths=/",
+          );
+
+          assert.equal(staleManifest.status, 204);
+          assert.equal(
+            staleManifest.headers.get("X-Remix-Reload-Document"),
+            "true",
+          );
+        } finally {
+          if (server.child.exitCode === null) {
+            server.child.kill("SIGTERM");
+            await once(server.child, "exit");
+          }
+        }
+      });
     } finally {
       await browser.close();
     }

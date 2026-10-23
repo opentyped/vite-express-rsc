@@ -18,10 +18,15 @@ const structured = new Set([
   "deprecated",
 ]);
 
+/** Check that metadata is an object rather than null or an array. */
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+/**
+ * Read static handler annotations and separate oapi fields from extra OpenAPI
+ * fields.
+ */
 export function metadata(
   node: ts.Expression,
   checker: ts.TypeChecker,
@@ -60,6 +65,7 @@ export function metadata(
   return { annotations, extras };
 }
 
+/** Apply explicit annotations without discarding generated nested schema fields. */
 function merge(target: object, incoming: Record<string, unknown>): void {
   for (const [key, value] of Object.entries(incoming)) {
     if (["__proto__", "constructor", "prototype"].includes(key)) {
@@ -82,8 +88,10 @@ export class OperationMetadata implements Parser {
 
   readonly stage = "document";
 
+  /** Remember the route annotations to apply after OpenAPI generation. */
   constructor(private readonly records: readonly RouteRecord[]) {}
 
+  /** Add each handler's explicit annotations to its generated operation. */
   parse(context: ParserContext): void {
     for (const item of this.records) {
       const method = item.method.toLowerCase() as Lowercase<

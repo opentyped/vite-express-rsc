@@ -1,0 +1,38 @@
+# Project requirements
+
+- Build a production-ready Vite plugin for Express 5, React 19 server/client components, and React Router RSC Data Mode.
+- Ship the main package in `packages/vite-express-rsc`, the optional OAPI parser in `packages/oapi`, and a working app in `examples/basic`.
+- Express belongs to the application: middleware, authentication, sessions, APIs, errors, listener, and shutdown. The package provides compilation and rendering adapters.
+- Use one Vite build for Node, RSC, HTML SSR, and browser code. No Next.js, Nitro, Framework Mode, separate frontend build, or second public HTTP server.
+- Configure `expressRsc({ directory: "./src/app" })` (optional `name`, default `"default"`). No plugin `entry` option; use Vite's build input, defaulting to `src/index.ts`.
+- `import app from "express/rsc/bundle"` (or `express/rsc/bundle/<name>`) returns the compiled Express handler; unknown names fail the build. No generated declaration files; imports must work in dev, production, and editors.
+- Expose type-only imports such as `PageLoader`, `PageProps`, and metadata types through `express/rsc`; request context comes from `express/rsc/context`.
+- `npm run dev` runs the real Express app with Vite updates. `npm run build && node dist/index.js` works without a dev server.
+- Deploy emitted chunks, manifests, browser assets, and declared runtime dependencies. No source imports from `dist/` or production filesystem route discovery.
+- Keep native Express modules under ordinary Node/React conditions, separate from the RSC module graph.
+- Use one route tree. Folder names such as `api` have no special meaning.
+- Support `page.tsx`, nested `layout.tsx` with `<Outlet />`, `[id]`, pathless `(group)`, catch-alls, `loading.tsx`, and `error.tsx`; document restrictions.
+- Generate deterministic nested routes with stable IDs and lazy imports. Ignore ordinary component files; reject conflicting paths/methods and ambiguous params.
+- `routes.tsx` and its `route.ts` alias export native GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS handlers. Derive paths from files.
+- Preserve Express params, body/query, URLs, cookies, redirects, streaming, `next()`, and errors. Honor explicit HEAD/OPTIONS and sensible native defaults.
+- Module `middlewares` accepts a handler or array; method-specific middleware uses `GET.middlewares`. Factories are called explicitly. No `mount()` API.
+- `middleware.ts` exports a default Express handler inherited by descendants. Layout middleware also protects every nested page and raw endpoint.
+- Run global middleware, ancestor middleware outer-to-inner, endpoint middleware, then method middleware. Finish all guards before loaders, metadata, or protected rendering.
+- Pages/layouts support native Express-style loaders returning typed data, plus static or async metadata. Raw endpoints do not run unrelated UI loaders or render JSX layouts.
+- Define metadata inheritance, title templates, merging/removal, and navigation cleanup without duplicate tags or browser leaks.
+- Use official React Router RSC transport, hydration, navigation, redirects, errors, and stale-client handling. Do not recreate its wire protocol.
+- Verify streamed HTML, hydration, persistent layouts, direct reloads, root/trailing-slash RSC requests, CSS, assets, and deployment-version recovery.
+- Decide UI status, headers, cookies, and redirects before commitment. Components do not receive mutable raw `res`; raw handlers retain full Express access.
+- Handle backpressure, HEAD cancellation, disconnects, aborted work, streaming errors, and application-supplied CSP nonces.
+- Explicitly bridge request identity, headers, services, nonce, and abort signal across environments. Test concurrent isolation; do not assume shared module singletons or AsyncLocalStorage.
+- Never assume localhost is the actual origin. Respect request URLs and the application's Express proxy configuration.
+- Keep database/server-only modules and secrets out of browser bundles and serialized loader data.
+- Prefer native Express mutations; no mandatory Server Actions. Application authentication, authorization, CSRF, validation, caching, and rate limiting remain application-owned.
+- `GET.openapi` uses strict OpenAPI 3.2 types. Annotations document behavior; they do not implement validation or security.
+- The OAPI parser statically reads annotated filesystem handlers, derives paths/types, and supplies declarations to existing OAPI tooling without executing application code or mutating its cached project.
+- Use TypeScript throughout, generated package declarations, ESLint, and Prettier. Keep readable spacing and simple function-purpose comments.
+- Keep README short: installation and practical code examples. Explain real limitations concisely; do not claim unsupported features.
+- Inspect current upstream APIs and record tested versions. Fail unsupported build configurations early with useful diagnostics.
+- Test actual dev/browser behavior, syntax-error repair, route additions/removals, native APIs, guard order, errors, redirects, cookies, context isolation, and cancellation under concurrency.
+- Pack/install outside the workspace, typecheck without hiding declaration errors, build, and run a source-free deployment using production dependencies only.
+- Run `npm run check` and the configured structural linter. Completion requires direct evidence for these requirements; do not label unfinished or unverified work production-ready.

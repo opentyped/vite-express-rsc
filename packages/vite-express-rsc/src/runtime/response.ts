@@ -3,7 +3,7 @@ import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { pipeline } from "node:stream/promises";
 import type { ServerResponse } from "node:http";
 
-/** Connect the renderer to Node with bounded buffering and disconnect cancellation. */
+/** Send a renderer response to Node and cancel its body when the client disconnects. */
 export async function sendResponse(
   res: ServerResponse,
   response: globalThis.Response,

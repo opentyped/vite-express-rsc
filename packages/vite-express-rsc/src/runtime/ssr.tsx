@@ -6,6 +6,10 @@ import {
   unstable_RSCStaticRouter as StaticRouter,
 } from "react-router";
 
+/**
+ * Return an RSC response directly or turn it into streaming HTML for a page
+ * request.
+ */
 export function generateHTML(
   request: Request,
   serverResponse: Response,
@@ -16,6 +20,10 @@ export function generateHTML(
     serverResponse,
     nonce,
     createFromReadableStream,
+    /**
+     * Render the decoded route tree with its browser bootstrap script and CSP
+     * nonce.
+     */
     async renderHTML(getPayload, options) {
       const payload = await getPayload();
 

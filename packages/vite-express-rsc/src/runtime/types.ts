@@ -1,16 +1,40 @@
 import "../express.js";
-import type { OpenAPIV3_1 } from "openapi-types";
+import type {
+  OperationObject,
+  ResponseObject,
+  ReferenceObject,
+} from "openapi3-ts/oas32";
 import type { Request, Response, RequestHandler } from "express";
 
-// An annotation may be incomplete while a route is being developed.
-export type OpenAPIOperation = Partial<OpenAPIV3_1.OperationObject>;
+type StatusDigit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9";
+type StatusClass = "1" | "2" | "3" | "4" | "5";
+type ResponseStatus =
+  | `${StatusClass}${StatusDigit}${StatusDigit}`
+  | `${StatusClass}XX`
+  | "default";
+
+type OperationResponses = {
+  [status in ResponseStatus]?: ResponseObject | ReferenceObject;
+} & {
+  [extension: `x-${string}`]: unknown;
+};
+
+// Keep OpenAPI 3.2 fields intact and check response keys and values more strictly
+// than the upstream ResponsesObject, whose string index accepts any value.
+export type OpenAPIOperation = Omit<OperationObject, "responses"> & {
+  responses?: OperationResponses;
+};
 
 export type Middlewares = RequestHandler | readonly RequestHandler[];
 
-export type PageLoader<T = unknown> = (
-  req: Request,
-  res: Response,
-) => T | Promise<T>;
+/**
+ * A page or layout loader. `Params` types `req.params`: folder params such as
+ * `[id]` are strings; pass `{ slug: string[] }` for a `[...slug]` catch-all.
+ */
+export type PageLoader<
+  T = unknown,
+  Params extends Record<string, string | string[]> = Record<string, string>,
+> = (req: Request<Params>, res: Response) => T | Promise<T>;
 
 export type LoaderData<T> = T extends (...args: never[]) => infer R
   ? Awaited<R>
@@ -48,16 +72,10 @@ export type MetadataFunction<T = unknown> = (
 export interface RouteModule {
   default?: unknown;
   middlewares?: Middlewares;
-  loader?: PageLoader;
+  /** Called with the matched request; its params type is checked at the page. */
+  loader?: (req: Request, res: Response) => unknown;
   metadata?: Metadata | MetadataFunction;
   [key: string]: unknown;
-}
-
-export interface Definition {
-  id: string;
-  path: string;
-  files: Record<string, { load(): Promise<RouteModule>; methods: string[] }>;
-  children: Definition[];
 }
 
 export interface ErrorProps {

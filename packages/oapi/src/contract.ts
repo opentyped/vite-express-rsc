@@ -3,7 +3,10 @@ import { sourceOf } from "@opentyped/oapi-ast/diagnostic";
 import type { Project } from "@opentyped/oapi-ast/project";
 import type { CompiledRoute, RouteRecord } from "./types.js";
 
-/** Add real, checked type aliases; synthetic TypeNodes have no TypeChecker types. */
+/**
+ * Give oapi checked request and response types without changing application source
+ * files.
+ */
 export function contracts(
   project: Project,
   records: readonly RouteRecord[],

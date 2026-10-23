@@ -6,6 +6,7 @@ import type {
 } from "./types.js";
 
 // Undefined inherits, null removes, objects merge, and arrays replace.
+/** Combine inherited metadata while allowing a child to replace or remove values. */
 function merge(
   parent: Record<string, unknown>,
   value: Record<string, unknown>,
@@ -37,8 +38,8 @@ function merge(
 }
 
 /**
- * Resolve layouts before their descendants so title templates and parent metadata
- * agree.
+ * Resolve metadata from outer layouts to the page, applying inherited title
+ * templates.
  */
 export async function resolveMetadata(
   modules: { module: RouteModule; props: PageProps }[],
@@ -84,7 +85,7 @@ export async function resolveMetadata(
   return parent;
 }
 
-/** Emit one managed set of tags; React hoists and updates them during navigation. */
+/** Render one set of head tags that React can update during navigation. */
 export function MetadataTags({ value }: { value: ResolvedMetadata }) {
   const og = value.openGraph;
   const robots =

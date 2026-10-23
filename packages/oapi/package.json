@@ -34,5 +34,8 @@
   "publishConfig": {
     "registry": "https://registry.npmjs.org",
     "access": "public"
+  },
+  "peerDependencies": {
+    "@opentyped/vite-express-rsc": "0.1.0"
   }
 }

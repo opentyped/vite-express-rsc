@@ -4,26 +4,14 @@ import path from "node:path";
 import test from "node:test";
 import { generate, GenerationCompiler } from "@opentyped/oapi-compiler";
 import { generateDefinitions } from "@opentyped/oapi-tsgen";
-import { SchemaDiscovery } from "@opentyped/oapi-compiler/parser/schema/discovery";
-import { JSDocEndpointParser } from "@opentyped/oapi-compiler/parser/endpoint/parser";
-import { DocumentParser } from "@opentyped/oapi-compiler/parser/document/parser";
-import {
-  SchemaSafety,
-  SchemaCompiler,
-} from "@opentyped/oapi-compiler/parser/schema/steps";
-import { DocumentEmitter } from "@opentyped/oapi-compiler/parser/document/emitter";
 import type { FilesystemOptions } from "../packages/oapi/dist/index.js";
 import type { Generation } from "@opentyped/oapi-compiler";
-import { filesystemParsers } from "../packages/oapi/dist/index.js";
+import {
+  filesystemParsers,
+  defaultParsers as defaults,
+} from "../packages/oapi/dist/index.js";
+import { scan, endpoints } from "../packages/vite-express-rsc/dist/routes.js";
 
-const defaults = () => [
-  new SchemaDiscovery(),
-  new JSDocEndpointParser(),
-  new DocumentParser(),
-  new SchemaSafety(),
-  new SchemaCompiler(),
-  new DocumentEmitter(),
-];
 const header = `import type { RequestHandler } from "express";
 import "@opentyped/vite-express-rsc/types";
 `;
@@ -37,12 +25,14 @@ interface Fixture {
   ): Generation;
 }
 
+/** Create an isolated TypeScript project and remove it after the test. */
 async function fixture(run: (fixture: Fixture) => Promise<void>) {
   const cache = path.resolve("node_modules/.cache");
 
   await mkdir(cache, { recursive: true });
 
   const root = await mkdtemp(path.join(cache, "oapi-"));
+  /** Write a source file into the parser fixture. */
   const put = async (name: string, text: string) => {
     const file = path.join(root, name);
 
@@ -66,6 +56,7 @@ async function fixture(run: (fixture: Fixture) => Promise<void>) {
     }),
   );
 
+  /** Generate OpenAPI output, optionally reusing an incremental compiler. */
   const build = (
     extra: Partial<FilesystemOptions> = {},
     compiler?: GenerationCompiler,
@@ -88,7 +79,7 @@ async function fixture(run: (fixture: Fixture) => Promise<void>) {
 }
 
 test("oapi compiles native Express filesystem handlers into real OpenAPI contracts", async () => {
-  await fixture(async ({ put, build }) => {
+  await fixture(async ({ root, put, build }) => {
     await put(
       "app/(internal)/orders/[id]/routes.tsx",
       header +
@@ -162,6 +153,13 @@ test("oapi compiles native Express filesystem handlers into real OpenAPI contrac
       "getApiHealth",
     );
     assert.equal(Object.keys(result.document.paths).length, 2);
+
+    // Documented paths are exactly the paths the Express router registers.
+    const served = endpoints(scan(path.join(root, "app")))
+      .filter((endpoint) => endpoint.route)
+      .map((endpoint) => "/api" + endpoint.path.replace(/:(\w+)/g, "{$1}"));
+
+    assert.deepEqual(Object.keys(result.document.paths).sort(), served.sort());
     assert.ok(Object.keys(result.document.components.schemas).length > 0);
     assert.deepEqual(build({ prefix: "/api" }).document, result.document);
 
@@ -191,7 +189,15 @@ test("oapi diagnostics reject ambiguous and unrepresentable filesystem contracts
         "app/(a)/same/route.ts": "GET.openapi = {};",
         "app/(b)/same/route.ts": "GET.openapi = {};",
       },
-      error: /Conflicting filesystem operation/,
+      error: /Conflicting routes/,
+    },
+    {
+      name: "ambiguous parameters",
+      files: {
+        "app/(a)/users/[id]/route.ts": "GET.openapi = {};",
+        "app/(b)/users/[name]/route.ts": "GET.openapi = {};",
+      },
+      error: /Conflicting routes/,
     },
     {
       name: "catchall",
